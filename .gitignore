@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+.pytest_cache/
+OUTPUT/*.xlsx
