@@ -140,6 +140,7 @@ def generar_reporte_mp(
         tienda_map = _clear_tienda_for_vale(tienda_map, tipo_entrega_map)
     if ordenes:
         LOGGER.info("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
+    facturada_map = _load_facturada_map(paths.salida_excel)
     df = _insertar_columnas_custom(
         df,
         rma_map,
@@ -149,6 +150,7 @@ def generar_reporte_mp(
         departamento_map,
         rma_diff_map,
         dni_map,
+        facturada_map,
         order_col,
     )
 
@@ -247,6 +249,7 @@ def _insertar_columnas_custom(
     departamento_map: dict[str, str],
     rma_diff_map: dict[str, str],
     dni_map: dict[str, str],
+    facturada_map: dict[str, str],
     order_col: str | None,
 ) -> pd.DataFrame:
     # Inserta columnas nuevas despues de las columnas existentes + 3 columnas vacias.
@@ -270,6 +273,8 @@ def _insertar_columnas_custom(
             values = orden_values
         elif name == "RMA":
             values = orden_values.map(lambda v: rma_map.get(v, ""))
+        elif name == "TIPO DE FACTURADA":
+            values = orden_values.map(lambda v: facturada_map.get(v, ""))
         elif name == "TIPO DE ENTREGA":
             values = orden_values.map(lambda v: tipo_entrega_map.get(v, ""))
         elif name == "TIENDA DESTINO":
@@ -340,7 +345,8 @@ def _to_text(value: Any) -> str:
         return str(value)
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
-    return str(value)
+    text = str(value)
+    return "" if text.strip().lower() == "nan" else text
 
 
 def _extraer_ordenes(df: pd.DataFrame, order_col: str | None) -> list[str]:
@@ -500,6 +506,28 @@ def _normalize_text(value: Any) -> str:
     for src, dst in replacements.items():
         text = text.replace(src, dst)
     return text
+
+
+def _load_facturada_map(path: Path) -> dict[str, str]:
+    ruta = Path(path)
+    if not ruta.exists():
+        return {}
+    try:
+        df_old = pd.read_excel(ruta, sheet_name=DATA_SHEET_NAME)
+    except Exception:
+        # Si no se puede leer, no preserva valores.
+        return {}
+    if "ORDEN" not in df_old.columns or "TIPO DE FACTURADA" not in df_old.columns:
+        return {}
+    facturada_map: dict[str, str] = {}
+    for _, row in df_old.iterrows():
+        orden = _normalize_order_value(row.get("ORDEN"))
+        valor = row.get("TIPO DE FACTURADA")
+        if orden and valor is not None and not pd.isna(valor):
+            text = str(valor).strip()
+            if text and text.lower() != "nan":
+                facturada_map[orden] = text
+    return facturada_map
 
 
 def _map_departamento(value: Any) -> str:
