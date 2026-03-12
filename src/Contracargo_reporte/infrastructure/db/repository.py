@@ -16,6 +16,7 @@ LOGGER = logging.getLogger(__name__)
 PG_RMA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaxOrder.sql"
 PG_TIPO_ENTREGA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntrega.sql"
 PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntregaFallback.sql"
+PG_DNI_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "DniPorOrden.sql"
 
 
 class PostgresRepository:
@@ -24,6 +25,7 @@ class PostgresRepository:
         self._query_rma = PG_RMA_QUERY_PATH.read_text(encoding="utf-8")
         self._query_tipo_entrega = PG_TIPO_ENTREGA_QUERY_PATH.read_text(encoding="utf-8")
         self._query_tipo_entrega_fallback = PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_dni = PG_DNI_QUERY_PATH.read_text(encoding="utf-8")
 
     def obtener_rmas_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
         if not ordenes:
@@ -55,6 +57,29 @@ class PostgresRepository:
                     # Solo registra vacio si no habia nada.
                     resultado.setdefault(uid_order, "")
         return resultado
+
+    def obtener_rmas_totales_por_ordenes(self, ordenes: list[str]) -> tuple[list[tuple[Any, ...]], list[str]]:
+        if not ordenes:
+            return [], ["uid_orders", "total_order", "uid_rmas", "total_rma"]
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_rma.replace("{{orders_in}}", orders_in)
+        return self._ejecutar_sql_raw(sql)
+
+    def obtener_dni_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
+        if not ordenes:
+            return {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_dni.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        dni_map: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]).strip() if row[0] is not None else ""
+            document = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            if uid_order:
+                dni_map[uid_order] = document
+        return dni_map
 
     def obtener_tipo_entrega_por_ordenes(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 
 SOURCE_SHEET_NAME = "Export after collection"
 DATA_SHEET_NAME = "Data"
+RMA_TOTALES_SHEET_NAME = "RMA_Totales_TMP"
 
 NEW_COLUMNS = [
     "ORDEN",
@@ -101,6 +103,10 @@ def generar_reporte_mp(
     if not ordenes:
         LOGGER.warning("No se encontraron valores de ORDEN en la columna '%s'.", ORDEN_SOURCE_COLUMN)
     rma_map_raw = repo.obtener_rmas_por_ordenes(ordenes)
+    rma_totales_rows, rma_totales_cols = repo.obtener_rmas_totales_por_ordenes(ordenes)
+    rma_diff_map = _build_rma_diff_map(rma_totales_rows)
+    dni_map_raw = repo.obtener_dni_por_ordenes(ordenes)
+    dni_map = {_normalize_order_value(k): _normalize_order_value(v) for k, v in dni_map_raw.items()}
     rma_map = {_normalize_order_value(k): v for k, v in rma_map_raw.items()}
     LOGGER.info("RMA encontrados: %s", len(rma_map))
     if rma_map:
@@ -141,6 +147,8 @@ def generar_reporte_mp(
         tienda_map,
         ubigeo_map,
         departamento_map,
+        rma_diff_map,
+        dni_map,
         order_col,
     )
 
@@ -154,6 +162,12 @@ def generar_reporte_mp(
         sheet_name=DATA_SHEET_NAME,
         date_columns=DATE_COLUMNS,
         date_format="dd/mm/yyyy",
+    )
+    exportar_pestana_texto(
+        rows=rma_totales_rows,
+        cols=rma_totales_cols,
+        ruta=paths.salida_excel,
+        sheet_name=RMA_TOTALES_SHEET_NAME,
     )
 
 
@@ -231,6 +245,8 @@ def _insertar_columnas_custom(
     tienda_map: dict[str, str],
     ubigeo_map: dict[str, str],
     departamento_map: dict[str, str],
+    rma_diff_map: dict[str, str],
+    dni_map: dict[str, str],
     order_col: str | None,
 ) -> pd.DataFrame:
     # Inserta columnas nuevas despues de las columnas existentes + 3 columnas vacias.
@@ -272,7 +288,9 @@ def _insertar_columnas_custom(
             else:
                 values = base
         elif name == "ESTADO FINAL":
-            values = _map_estado_final(df)
+            values = _map_estado_final(df, rma_diff_map, order_col)
+        elif name == "DNI":
+            values = orden_values.map(lambda v: dni_map.get(v, ""))
         else:
             values = ""
         df.insert(insert_pos + idx, name, values)
@@ -390,7 +408,7 @@ def _map_estado_mp(value: Any) -> str:
     return mapping.get(text, "")
 
 
-def _map_estado_final(df: pd.DataFrame) -> pd.Series:
+def _map_estado_final(df: pd.DataFrame, rma_diff_map: dict[str, str], order_col: str | None) -> pd.Series:
     if "Estado" in df.columns:
         base_mp = df["Estado"].map(_map_estado_mp).fillna("")
     else:
@@ -402,7 +420,59 @@ def _map_estado_final(df: pd.DataFrame) -> pd.Series:
         "CERRADO EN CONTRA": "PERDIDA",
     }
     estado_final = base_mp.map(lambda v: mapping.get(v, ""))
+    if order_col and order_col in df.columns and rma_diff_map:
+        orden_values = df[order_col].apply(_normalize_order_value)
+        override = orden_values.map(lambda v: rma_diff_map.get(v, ""))
+        estado_final = override.where(override != "", estado_final)
     return estado_final
+
+
+def _build_rma_diff_map(rows: list[tuple[Any, ...]]) -> dict[str, str]:
+    diff_map: dict[str, str] = {}
+    for row in rows:
+        if not row:
+            continue
+        uid_order = _normalize_order_value(row[0]) if len(row) > 0 else ""
+        total_order = row[1] if len(row) > 1 else None
+        total_rma = row[3] if len(row) > 3 else None
+        if not uid_order or total_order is None or total_rma is None:
+            continue
+        diff = _decimal_diff(total_order, total_rma)
+        if diff is None:
+            continue
+        diff_map[uid_order] = "NO PERDIDA" if diff == 0 else "PERDIDA"
+    return diff_map
+
+
+
+
+def _decimal_diff(a: Any, b: Any) -> int | None:
+    try:
+        da = _parse_decimal_local(a)
+        db = _parse_decimal_local(b)
+    except InvalidOperation:
+        return None
+    return 0 if da.quantize(Decimal("0.01")) == db.quantize(Decimal("0.01")) else 1
+
+
+def _parse_decimal_local(value: Any) -> Decimal:
+    if value is None:
+        raise InvalidOperation
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip()
+    if text == "":
+        raise InvalidOperation
+    cleaned = []
+    for ch in text:
+        if ch.isdigit() or ch in {".", ",", "-"}:
+            cleaned.append(ch)
+    text = "".join(cleaned)
+    if "," in text and "." in text:
+        text = text.replace(",", "")
+    elif "," in text and "." not in text:
+        text = text.replace(",", ".")
+    return Decimal(text)
 
 
 def _resolve_order_column(df: pd.DataFrame) -> str | None:
