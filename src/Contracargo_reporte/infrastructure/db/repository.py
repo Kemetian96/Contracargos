@@ -1,50 +1,113 @@
 import logging
 import time
-from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 
-from ...domain.cuid import fecha_a_cuid
 from ..config import Settings
 
 
 LOGGER = logging.getLogger(__name__)
 
 # Rutas SQL por motor.
-PG_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TUTATI.sql"
+PG_RMA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaxOrder.sql"
+PG_TIPO_ENTREGA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntrega.sql"
+PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntregaFallback.sql"
 
 
 class PostgresRepository:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        # Carga SQL parametrizado para PostgreSQL.
-        self._query = PG_QUERY_PATH.read_text(encoding="utf-8")
-        # Carga SQL principal (TUTATI).
-        # Otros SQLs no se usan en este proyecto.
+        self._query_rma = PG_RMA_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_tipo_entrega = PG_TIPO_ENTREGA_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_tipo_entrega_fallback = PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH.read_text(encoding="utf-8")
 
-    def ejecutar_consulta_sql(
+    def obtener_rmas_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
+        if not ordenes:
+            return {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_rma.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        LOGGER.info("RMA query rows: %s", len(rows))
+        if rows:
+            LOGGER.info("RMA sample rows: %s", rows[:5])
+        resultado: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]).strip() if row[0] is not None else ""
+            total_order = row[1] if len(row) > 1 else None
+            if len(row) >= 4:
+                uid_rma = str(row[2]).strip() if row[2] is not None else ""
+                total_rma = row[3]
+            else:
+                uid_rma = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+                total_rma = None
+            if uid_order:
+                if uid_rma:
+                    # Si ya existe un valor no vacio, no lo sobreescribimos.
+                    if uid_order not in resultado or not resultado[uid_order]:
+                        resultado[uid_order] = uid_rma
+                else:
+                    # Solo registra vacio si no habia nada.
+                    resultado.setdefault(uid_order, "")
+        return resultado
+
+    def obtener_tipo_entrega_por_ordenes(
         self,
-        fecha_inicio: date,
-        fecha_fin: date,
-    ) -> tuple[list[tuple[Any, ...]], list[str]]:
-        return self._ejecutar_sql(self._query, fecha_inicio, fecha_fin)
+        ordenes: list[str],
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        if not ordenes:
+            return {}, {}, {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_tipo_entrega.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        tipo_map: dict[str, str] = {}
+        tienda_map: dict[str, str] = {}
+        ubigeo_map: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]) if row[0] is not None else ""
+            tipo = str(row[1]) if row[1] is not None else ""
+            if uid_order:
+                tipo_map[uid_order] = tipo
+                if len(row) > 2 and row[2] is not None:
+                    tienda_map[uid_order] = str(row[2])
+                if len(row) > 3 and row[3] is not None:
+                    ubigeo_map[uid_order] = str(row[3])
+        return tipo_map, tienda_map, ubigeo_map
 
-    def _ejecutar_sql(
+    def obtener_tipo_entrega_fallback(
+        self,
+        ordenes: list[str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        if not ordenes:
+            return {}, {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_tipo_entrega_fallback.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        tipo_map: dict[str, str] = {}
+        ubigeo_map: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]) if row[0] is not None else ""
+            tipo = str(row[1]) if row[1] is not None else ""
+            if uid_order:
+                tipo_map[uid_order] = tipo
+                if len(row) > 2 and row[2] is not None:
+                    ubigeo_map[uid_order] = str(row[2])
+        return tipo_map, ubigeo_map
+
+    def _ejecutar_sql_params(
         self,
         query: str,
-        fecha_inicio: date,
-        fecha_fin: date,
+        params: dict[str, Any],
     ) -> tuple[list[tuple[Any, ...]], list[str]]:
-        # Convierte rango fecha->CUID para filtro en PostgreSQL.
-        inicio_dt = datetime.combine(fecha_inicio, datetime.min.time())
-        fin_dt = datetime.combine(fecha_fin + timedelta(days=1), datetime.min.time())
-        params = {
-            "fecha1": fecha_a_cuid(inicio_dt),
-            "fecha2": fecha_a_cuid(fin_dt),
-        }
-
         # Reintenta la conexion ante cortes.
         for intento in range(1, self._settings.reintentos + 1):
             conn = None
@@ -65,15 +128,130 @@ class PostgresRepository:
                 )
                 conn.autocommit = True
                 cur = conn.cursor()
-                # Ejecuta SQL y devuelve filas + cabeceras.
                 cur.execute(query, params)
                 rows = cur.fetchall()
-                if cur.description is None:
-                    raise RuntimeError("La consulta PostgreSQL no devolvio metadatos de columnas.")
-                cols = [c[0] for c in cur.description]
+                cols = [c[0] for c in cur.description] if cur.description else []
                 return rows, cols
             except psycopg2.OperationalError as exc:
-                # Log por intento para diagnostico de red.
+                LOGGER.warning(
+                    "Conexion PostgreSQL caida (intento %s/%s): %s",
+                    intento,
+                    self._settings.reintentos,
+                    exc,
+                )
+                if intento == self._settings.reintentos:
+                    raise
+                time.sleep(self._settings.espera_segundos)
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+        raise RuntimeError("No se pudo ejecutar la consulta PostgreSQL tras todos los reintentos.")
+
+    def _ejecutar_sql_raw(self, query: str) -> tuple[list[tuple[Any, ...]], list[str]]:
+        # Reintenta la conexion ante cortes.
+        for intento in range(1, self._settings.reintentos + 1):
+            conn = None
+            cur = None
+            try:
+                conn = psycopg2.connect(
+                    host=self._settings.pg_host,
+                    dbname=self._settings.pg_name,
+                    user=self._settings.pg_user,
+                    password=self._settings.pg_password,
+                    port=self._settings.pg_port,
+                    sslmode=self._settings.pg_sslmode,
+                    connect_timeout=self._settings.pg_connect_timeout,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+                conn.autocommit = True
+                cur = conn.cursor()
+                cur.execute(query)
+                rows = cur.fetchall()
+                cols = [c[0] for c in cur.description] if cur.description else []
+                return rows, cols
+            except psycopg2.OperationalError as exc:
+                LOGGER.warning(
+                    "Conexion PostgreSQL caida (intento %s/%s): %s",
+                    intento,
+                    self._settings.reintentos,
+                    exc,
+                )
+                if intento == self._settings.reintentos:
+                    raise
+                time.sleep(self._settings.espera_segundos)
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+        raise RuntimeError("No se pudo ejecutar la consulta PostgreSQL tras todos los reintentos.")
+
+
+def _totales_diferentes(a: Any, b: Any) -> bool:
+    try:
+        da = _parse_decimal(a)
+        db = _parse_decimal(b)
+    except InvalidOperation:
+        return False
+    # Compara con 2 decimales (monto monetario)
+    return da.quantize(Decimal("0.01")) != db.quantize(Decimal("0.01"))
+
+
+def _parse_decimal(value: Any) -> Decimal:
+    if value is None:
+        raise InvalidOperation
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip()
+    if text == "":
+        raise InvalidOperation
+    # Deja solo digitos, punto, coma y signo.
+    cleaned = []
+    for ch in text:
+        if ch.isdigit() or ch in {".", ",", "-"}:
+            cleaned.append(ch)
+    text = "".join(cleaned)
+    # Si tiene coma y punto, asume que la coma es miles.
+    if "," in text and "." in text:
+        text = text.replace(",", "")
+    # Si solo tiene coma, asume coma decimal.
+    elif "," in text and "." not in text:
+        text = text.replace(",", ".")
+    return Decimal(text)
+
+    def _ejecutar_sql_raw(self, query: str) -> tuple[list[tuple[Any, ...]], list[str]]:
+        # Reintenta la conexion ante cortes.
+        for intento in range(1, self._settings.reintentos + 1):
+            conn = None
+            cur = None
+            try:
+                conn = psycopg2.connect(
+                    host=self._settings.pg_host,
+                    dbname=self._settings.pg_name,
+                    user=self._settings.pg_user,
+                    password=self._settings.pg_password,
+                    port=self._settings.pg_port,
+                    sslmode=self._settings.pg_sslmode,
+                    connect_timeout=self._settings.pg_connect_timeout,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+                conn.autocommit = True
+                cur = conn.cursor()
+                cur.execute(query)
+                rows = cur.fetchall()
+                cols = [c[0] for c in cur.description] if cur.description else []
+                return rows, cols
+            except psycopg2.OperationalError as exc:
                 LOGGER.warning(
                     "Conexion PostgreSQL caida (intento %s/%s): %s",
                     intento,
@@ -109,3 +287,12 @@ class PostgresRepository:
         finally:
             cur.close()
             conn.close()
+
+
+def _render_in_list(values: list[str]) -> str:
+    # Renderiza lista para IN ('a','b','c') con escape basico.
+    safe = []
+    for value in values:
+        raw = str(value).replace("'", "''")
+        safe.append(f"'{raw}'")
+    return ", ".join(safe)
