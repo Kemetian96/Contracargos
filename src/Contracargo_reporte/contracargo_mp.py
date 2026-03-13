@@ -12,7 +12,7 @@ import pandas as pd
 
 from .infrastructure.config import Settings, load_settings
 from .infrastructure.db.repository import PostgresRepository
-from .infrastructure.export import exportar_pestana_texto
+from .infrastructure.export import exportar_pestana_texto, eliminar_pestanas
 
 
 LOGGER = logging.getLogger(__name__)
@@ -20,7 +20,6 @@ LOGGER = logging.getLogger(__name__)
 
 SOURCE_SHEET_NAME = "Export after collection"
 DATA_SHEET_NAME = "Data"
-RMA_FINAL_SHEET_NAME = "RMA_Final_TMP"
 
 NEW_COLUMNS = [
     "ORDEN",
@@ -102,20 +101,20 @@ def generar_reporte_mp(
         LOGGER.info("Ejemplo ORDEN: %s", ordenes[:5])
     if not ordenes:
         LOGGER.warning("No se encontraron valores de ORDEN en la columna '%s'.", ORDEN_SOURCE_COLUMN)
-    rma_map_raw = repo.obtener_rmas_por_ordenes(ordenes)
     rma_totales_rows, _rma_totales_cols = repo.obtener_rmas_totales_por_ordenes(ordenes)
     rma_diff_map = _build_rma_diff_map(rma_totales_rows)
-    rma_final_map_raw = repo.obtener_rmas_finales_por_ordenes(ordenes)
+    rma_final_map_raw, rma_order_totals = repo.obtener_rmas_finales_por_ordenes(ordenes)
     dni_map_raw = repo.obtener_dni_por_ordenes(ordenes)
     dni_map = {_normalize_order_value(k): _normalize_order_value(v) for k, v in dni_map_raw.items()}
-    rma_map = {_normalize_order_value(k): v for k, v in rma_map_raw.items()}
     rma_final_map = {_normalize_order_value(k): v for k, v in rma_final_map_raw.items()}
-    LOGGER.info("RMA encontrados: %s", len(rma_map))
+    rma_diff_map = _build_rma_diff_map_from_chain(rma_final_map, rma_order_totals)
+    rma_map = _build_rma_concat_map(rma_final_map)
+    LOGGER.info("RMA finales encontrados: %s", len(rma_map))
     if rma_map:
-        LOGGER.info("Ejemplo RMA: %s", list(rma_map.items())[:5])
+        LOGGER.info("Ejemplo RMA finales: %s", list(rma_map.items())[:5])
     non_empty_rma = sum(1 for v in rma_map.values() if v)
     if non_empty_rma == 0 and rma_map:
-        LOGGER.warning("Todos los RMA devueltos vienen vacios. Revisa la columna uid_rmas en el SQL.")
+        LOGGER.warning("Todos los RMA finales vienen vacios. Revisa la logica de cadena.")
     else:
         LOGGER.info("RMA no vacios: %s", non_empty_rma)
     tipo_entrega_raw, tienda_raw, ubigeo_raw = repo.obtener_tipo_entrega_por_ordenes(ordenes)
@@ -144,6 +143,8 @@ def generar_reporte_mp(
     vale_orders = [o for o in ordenes if tipo_entrega_map.get(_normalize_order_value(o)) == "VALE"]
     egift_status_raw = repo.obtener_egift_status_por_ordenes(vale_orders)
     vale_final_map = _build_vale_final_map(egift_status_raw)
+    orders_status_raw = repo.obtener_orders_status_por_ordenes(vale_orders)
+    vale_status_map = _build_vale_status_map(orders_status_raw)
 
     if ordenes:
         LOGGER.info("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
@@ -159,6 +160,7 @@ def generar_reporte_mp(
         dni_map,
         facturada_map,
         vale_final_map,
+        vale_status_map,
         order_col,
     )
 
@@ -173,21 +175,7 @@ def generar_reporte_mp(
         date_columns=DATE_COLUMNS,
         date_format="dd/mm/yyyy",
     )
-    rma_final_rows: list[tuple[str, str, str]] = []
-    for order in ordenes:
-        key = _normalize_order_value(order)
-        finals = rma_final_map.get(key, [])
-        if not finals:
-            rma_final_rows.append((order, "", ""))
-            continue
-        for rma, rma_type in finals:
-            rma_final_rows.append((order, rma, rma_type))
-    exportar_pestana_texto(
-        rows=rma_final_rows,
-        cols=["UID_ORDEN", "UID_RMAS_FINAL", "ID_RMAS_TYPES"],
-        ruta=paths.salida_excel,
-        sheet_name=RMA_FINAL_SHEET_NAME,
-    )
+    eliminar_pestanas(paths.salida_excel, ["RMA_Totales_TMP", "RMA_Final_TMP"])
 
 
 def _cargar_y_transformar(origen_excel: Path) -> pd.DataFrame:
@@ -268,6 +256,7 @@ def _insertar_columnas_custom(
     dni_map: dict[str, str],
     facturada_map: dict[str, str],
     vale_final_map: dict[str, str],
+    vale_status_map: dict[str, str],
     order_col: str | None,
 ) -> pd.DataFrame:
     # Inserta columnas nuevas despues de las columnas existentes + 3 columnas vacias.
@@ -311,7 +300,7 @@ def _insertar_columnas_custom(
             else:
                 values = base
         elif name == "ESTADO FINAL":
-            values = _map_estado_final(df, rma_diff_map, vale_final_map, order_col)
+            values = _map_estado_final(df, rma_diff_map, vale_final_map, vale_status_map, order_col)
         elif name == "DNI":
             values = orden_values.map(lambda v: dni_map.get(v, ""))
         else:
@@ -436,6 +425,7 @@ def _map_estado_final(
     df: pd.DataFrame,
     rma_diff_map: dict[str, str],
     vale_final_map: dict[str, str],
+    vale_status_map: dict[str, str],
     order_col: str | None,
 ) -> pd.Series:
     if "Estado" in df.columns:
@@ -460,10 +450,65 @@ def _map_estado_final(
             # Override VALE al final de toda la logica.
             override_vale = orden_values.map(lambda v: vale_final_map.get(v, ""))
             estado_final = override_vale.where(override_vale != "", estado_final)
+        if vale_status_map:
+            # Si es VALE y status < 0 => NO PERDIDA (al final).
+            override_vale_status = orden_values.map(lambda v: vale_status_map.get(v, ""))
+            estado_final = override_vale_status.where(override_vale_status != "", estado_final)
+    # Si ESTADO MP es CUBIERTO, fuerza NO PERDIDA por encima de todo.
+    cubierto_mask = base_mp == "CUBIERTO"
+    if cubierto_mask.any():
+        estado_final = estado_final.where(~cubierto_mask, "NO PERDIDA")
     return estado_final
 
 
+def _build_rma_diff_map_from_chain(
+    rma_final_map: dict[str, list[tuple[str, str, str]]],
+    order_totals: dict[str, Any],
+) -> dict[str, str]:
+    diff_map: dict[str, str] = {}
+    for order, finals in rma_final_map.items():
+        if order not in order_totals or not finals:
+            continue
+        # Regla: si hay un RMA tipo 4 -> NO PERDIDA
+        if any(str(rma_type).strip() == "4" for _uid, rma_type, _total in finals):
+            diff_map[order] = "NO PERDIDA"
+            continue
+        total_order = _parse_decimal_local(order_totals[order])
+        suma_rmas = Decimal("0.00")
+        tiene_rma_tipo = False
+        for _uid_rma, rma_type, rma_total in finals:
+            if str(rma_type).strip() not in {"2", "5"}:
+                continue
+            if rma_total is None or str(rma_total).strip() == "":
+                continue
+            tiene_rma_tipo = True
+            suma_rmas += _parse_decimal_local(rma_total)
+        if not tiene_rma_tipo:
+            continue
+        diff = total_order - suma_rmas
+        if diff.quantize(Decimal("0.01")) == Decimal("0.00"):
+            diff_map[order] = "NO PERDIDA"
+        else:
+            diff_map[order] = "PERDIDA"
+    return diff_map
+
+
+def _build_rma_concat_map(
+    rma_final_map: dict[str, list[tuple[str, str, str]]],
+) -> dict[str, str]:
+    """Concatena RMAs finales de tipo 2 y 5 separados por '-'."""
+    concat_map: dict[str, str] = {}
+    for order, finals in rma_final_map.items():
+        if not finals:
+            continue
+        filtered = [uid for uid, rma_type, _total in finals if str(rma_type).strip() in {"2", "5"} and uid]
+        if filtered:
+            concat_map[order] = "-".join(filtered)
+    return concat_map
+
+
 def _build_rma_diff_map(rows: list[tuple[Any, ...]]) -> dict[str, str]:
+    # Deprecated: kept for compatibility if needed.
     diff_map: dict[str, str] = {}
     for row in rows:
         if not row:
@@ -488,6 +533,18 @@ def _build_vale_final_map(status_map: dict[str, str]) -> dict[str, str]:
             vale_map[key] = "NO PERDIDA"
         elif status in {"1", "2", "3"}:
             vale_map[key] = "PENDIENTE"
+    return vale_map
+
+
+def _build_vale_status_map(status_map: dict[str, str]) -> dict[str, str]:
+    vale_map: dict[str, str] = {}
+    for order, status in status_map.items():
+        key = _normalize_order_value(order)
+        try:
+            if int(str(status).strip()) < 0:
+                vale_map[key] = "NO PERDIDA"
+        except ValueError:
+            continue
     return vale_map
 
 

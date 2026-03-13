@@ -69,3 +69,17 @@ def _clear_sheet(ws) -> None:
     for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
         for cell in row:
             cell.value = None
+
+
+def eliminar_pestanas(ruta: Path, sheet_names: list[str]) -> None:
+    ruta = Path(ruta)
+    if not ruta.exists() or not sheet_names:
+        return
+    wb = load_workbook(ruta)
+    removed = False
+    for name in sheet_names:
+        if name in wb.sheetnames:
+            del wb[name]
+            removed = True
+    if removed:
+        wb.save(ruta)

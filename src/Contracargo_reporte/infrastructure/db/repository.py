@@ -20,6 +20,7 @@ PG_TIPO_ENTREGA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "Tipo
 PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntregaFallback.sql"
 PG_DNI_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "DniPorOrden.sql"
 PG_EGIFT_STATUS_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "EgiftcardsStatusVale.sql"
+PG_ORDERS_STATUS_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "OrdersStatusVale.sql"
 
 
 class PostgresRepository:
@@ -32,6 +33,7 @@ class PostgresRepository:
         self._query_tipo_entrega_fallback = PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH.read_text(encoding="utf-8")
         self._query_dni = PG_DNI_QUERY_PATH.read_text(encoding="utf-8")
         self._query_egift_status = PG_EGIFT_STATUS_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_orders_status = PG_ORDERS_STATUS_QUERY_PATH.read_text(encoding="utf-8")
 
     def obtener_rmas_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
         if not ordenes:
@@ -64,31 +66,39 @@ class PostgresRepository:
                     resultado.setdefault(uid_order, "")
         return resultado
 
-    def obtener_rmas_finales_por_ordenes(self, ordenes: list[str]) -> dict[str, list[tuple[str, str]]]:
+    def obtener_rmas_finales_por_ordenes(
+        self,
+        ordenes: list[str],
+    ) -> tuple[dict[str, list[tuple[str, str, str]]], dict[str, Any]]:
         """RMA finales (sin mas camino) siguiendo id_orders_used (solo para pestaña temporal)."""
         if not ordenes:
-            return {}
+            return {}, {}
         rows = self._ejecutar_sql_raw(
             self._query_rma_chain_uid.replace("{{orders_in}}", _render_in_list(ordenes))
         )[0]
-        resultado: dict[str, list[tuple[str, str]]] = {}
-        pending: dict[str, tuple[str, str, str]] = {}
-        direct_final: dict[str, set[tuple[str, str]]] = {}
+        resultado: dict[str, list[tuple[str, str, str]]] = {}
+        order_totals: dict[str, Any] = {}
+        pending: dict[str, tuple[str, str, str, str]] = {}
+        direct_final: dict[str, set[tuple[str, str, str]]] = {}
         for row in rows:
             if not row:
                 continue
             uid_order = str(row[0]).strip() if row[0] is not None else ""
-            uid_rma = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-            id_used = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
-            rma_type = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+            total_order = row[1] if len(row) > 1 else None
+            uid_rma = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+            id_used = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+            rma_type = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
+            rma_total = row[5] if len(row) > 5 else None
             if uid_order:
+                if total_order is not None and uid_order not in order_totals:
+                    order_totals[uid_order] = total_order
                 if uid_rma and not id_used:
-                    direct_final.setdefault(uid_order, set()).add((uid_rma, rma_type))
+                    direct_final.setdefault(uid_order, set()).add((uid_rma, rma_type, str(rma_total) if rma_total is not None else ""))
                 if id_used:
-                    pending[uid_order] = (id_used, uid_rma, rma_type)
+                    pending[uid_order] = (id_used, uid_rma, rma_type, str(rma_total) if rma_total is not None else "")
 
         visited: dict[str, set[str]] = {k: set() for k in pending}
-        cache_by_id: dict[str, tuple[str, str, str]] = {}
+        cache_by_id: dict[str, tuple[str, str, str, str]] = {}
         max_iter = 20
         while pending and max_iter > 0:
             max_iter -= 1
@@ -104,12 +114,18 @@ class PostgresRepository:
                     uid_rma = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
                     id_used = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
                     rma_type = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
+                    rma_total = row[5] if len(row) > 5 else None
                     if id_order:
-                        cache_by_id[id_order] = (uid_rma, id_used, rma_type)
+                        cache_by_id[id_order] = (
+                            uid_rma,
+                            id_used,
+                            rma_type,
+                            str(rma_total) if rma_total is not None else "",
+                        )
 
-            next_pending: dict[str, tuple[str, str, str]] = {}
-            next_final: dict[str, set[tuple[str, str]]] = {}
-            for orig, (id_used, last_rma, last_type) in pending.items():
+            next_pending: dict[str, tuple[str, str, str, str]] = {}
+            next_final: dict[str, set[tuple[str, str, str]]] = {}
+            for orig, (id_used, last_rma, last_type, last_total) in pending.items():
                 if not id_used:
                     continue
                 if id_used in visited.setdefault(orig, set()):
@@ -119,17 +135,18 @@ class PostgresRepository:
                 if not row:
                     # Si no hay datos para ese id, considera el ultimo RMA conocido como final.
                     if last_rma:
-                        next_final.setdefault(orig, set()).add((last_rma, last_type))
+                        next_final.setdefault(orig, set()).add((last_rma, last_type, last_total))
                     continue
-                uid_rma, next_id, rma_type = row
+                uid_rma, next_id, rma_type, rma_total = row
                 if uid_rma:
                     last_rma = uid_rma
                     last_type = rma_type
+                    last_total = rma_total
                 if not next_id:
                     if last_rma:
-                        next_final.setdefault(orig, set()).add((last_rma, last_type))
+                        next_final.setdefault(orig, set()).add((last_rma, last_type, last_total))
                 else:
-                    next_pending[orig] = (next_id, last_rma, last_type)
+                    next_pending[orig] = (next_id, last_rma, last_type, last_total)
             pending = next_pending
             for k, vals in next_final.items():
                 direct_final.setdefault(k, set()).update(vals)
@@ -137,7 +154,7 @@ class PostgresRepository:
         # Convierte a listas ordenadas
         for order, vals in direct_final.items():
             resultado[order] = sorted(vals)
-        return resultado
+        return resultado, order_totals
 
     def obtener_rmas_totales_por_ordenes(self, ordenes: list[str]) -> tuple[list[tuple[Any, ...]], list[str]]:
         if not ordenes:
@@ -167,6 +184,22 @@ class PostgresRepository:
             return {}
         orders_in = _render_in_list(ordenes)
         sql = self._query_egift_status.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        status_map: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]).strip() if row[0] is not None else ""
+            status = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            if uid_order:
+                status_map[uid_order] = status
+        return status_map
+
+    def obtener_orders_status_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
+        if not ordenes:
+            return {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_orders_status.replace("{{orders_in}}", orders_in)
         rows, _cols = self._ejecutar_sql_raw(sql)
         status_map: dict[str, str] = {}
         for row in rows:
