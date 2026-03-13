@@ -14,6 +14,8 @@ LOGGER = logging.getLogger(__name__)
 
 # Rutas SQL por motor.
 PG_RMA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaxOrder.sql"
+PG_RMA_CHAIN_UID_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaChainByUid.sql"
+PG_RMA_CHAIN_ID_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaChainById.sql"
 PG_TIPO_ENTREGA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntrega.sql"
 PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntregaFallback.sql"
 PG_DNI_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "DniPorOrden.sql"
@@ -24,6 +26,8 @@ class PostgresRepository:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._query_rma = PG_RMA_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_rma_chain_uid = PG_RMA_CHAIN_UID_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_rma_chain_id = PG_RMA_CHAIN_ID_QUERY_PATH.read_text(encoding="utf-8")
         self._query_tipo_entrega = PG_TIPO_ENTREGA_QUERY_PATH.read_text(encoding="utf-8")
         self._query_tipo_entrega_fallback = PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH.read_text(encoding="utf-8")
         self._query_dni = PG_DNI_QUERY_PATH.read_text(encoding="utf-8")
@@ -58,6 +62,81 @@ class PostgresRepository:
                 else:
                     # Solo registra vacio si no habia nada.
                     resultado.setdefault(uid_order, "")
+        return resultado
+
+    def obtener_rmas_finales_por_ordenes(self, ordenes: list[str]) -> dict[str, list[tuple[str, str]]]:
+        """RMA finales (sin mas camino) siguiendo id_orders_used (solo para pestaña temporal)."""
+        if not ordenes:
+            return {}
+        rows = self._ejecutar_sql_raw(
+            self._query_rma_chain_uid.replace("{{orders_in}}", _render_in_list(ordenes))
+        )[0]
+        resultado: dict[str, list[tuple[str, str]]] = {}
+        pending: dict[str, tuple[str, str, str]] = {}
+        direct_final: dict[str, set[tuple[str, str]]] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]).strip() if row[0] is not None else ""
+            uid_rma = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            id_used = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+            rma_type = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+            if uid_order:
+                if uid_rma and not id_used:
+                    direct_final.setdefault(uid_order, set()).add((uid_rma, rma_type))
+                if id_used:
+                    pending[uid_order] = (id_used, uid_rma, rma_type)
+
+        visited: dict[str, set[str]] = {k: set() for k in pending}
+        cache_by_id: dict[str, tuple[str, str, str]] = {}
+        max_iter = 20
+        while pending and max_iter > 0:
+            max_iter -= 1
+            ids_needed = {v[0] for v in pending.values() if v and v[0] and v[0] not in cache_by_id}
+            if ids_needed:
+                rows_by_id = self._ejecutar_sql_raw(
+                    self._query_rma_chain_id.replace("{{orders_in}}", _render_in_list(list(ids_needed)))
+                )[0]
+                for row in rows_by_id:
+                    if not row:
+                        continue
+                    id_order = str(row[0]).strip() if row[0] is not None else ""
+                    uid_rma = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+                    id_used = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+                    rma_type = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
+                    if id_order:
+                        cache_by_id[id_order] = (uid_rma, id_used, rma_type)
+
+            next_pending: dict[str, tuple[str, str, str]] = {}
+            next_final: dict[str, set[tuple[str, str]]] = {}
+            for orig, (id_used, last_rma, last_type) in pending.items():
+                if not id_used:
+                    continue
+                if id_used in visited.setdefault(orig, set()):
+                    continue
+                visited[orig].add(id_used)
+                row = cache_by_id.get(id_used)
+                if not row:
+                    # Si no hay datos para ese id, considera el ultimo RMA conocido como final.
+                    if last_rma:
+                        next_final.setdefault(orig, set()).add((last_rma, last_type))
+                    continue
+                uid_rma, next_id, rma_type = row
+                if uid_rma:
+                    last_rma = uid_rma
+                    last_type = rma_type
+                if not next_id:
+                    if last_rma:
+                        next_final.setdefault(orig, set()).add((last_rma, last_type))
+                else:
+                    next_pending[orig] = (next_id, last_rma, last_type)
+            pending = next_pending
+            for k, vals in next_final.items():
+                direct_final.setdefault(k, set()).update(vals)
+
+        # Convierte a listas ordenadas
+        for order, vals in direct_final.items():
+            resultado[order] = sorted(vals)
         return resultado
 
     def obtener_rmas_totales_por_ordenes(self, ordenes: list[str]) -> tuple[list[tuple[Any, ...]], list[str]]:

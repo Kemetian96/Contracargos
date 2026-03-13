@@ -20,7 +20,7 @@ LOGGER = logging.getLogger(__name__)
 
 SOURCE_SHEET_NAME = "Export after collection"
 DATA_SHEET_NAME = "Data"
-RMA_TOTALES_SHEET_NAME = "RMA_Totales_TMP"
+RMA_FINAL_SHEET_NAME = "RMA_Final_TMP"
 
 NEW_COLUMNS = [
     "ORDEN",
@@ -103,11 +103,13 @@ def generar_reporte_mp(
     if not ordenes:
         LOGGER.warning("No se encontraron valores de ORDEN en la columna '%s'.", ORDEN_SOURCE_COLUMN)
     rma_map_raw = repo.obtener_rmas_por_ordenes(ordenes)
-    rma_totales_rows, rma_totales_cols = repo.obtener_rmas_totales_por_ordenes(ordenes)
+    rma_totales_rows, _rma_totales_cols = repo.obtener_rmas_totales_por_ordenes(ordenes)
     rma_diff_map = _build_rma_diff_map(rma_totales_rows)
+    rma_final_map_raw = repo.obtener_rmas_finales_por_ordenes(ordenes)
     dni_map_raw = repo.obtener_dni_por_ordenes(ordenes)
     dni_map = {_normalize_order_value(k): _normalize_order_value(v) for k, v in dni_map_raw.items()}
     rma_map = {_normalize_order_value(k): v for k, v in rma_map_raw.items()}
+    rma_final_map = {_normalize_order_value(k): v for k, v in rma_final_map_raw.items()}
     LOGGER.info("RMA encontrados: %s", len(rma_map))
     if rma_map:
         LOGGER.info("Ejemplo RMA: %s", list(rma_map.items())[:5])
@@ -171,11 +173,20 @@ def generar_reporte_mp(
         date_columns=DATE_COLUMNS,
         date_format="dd/mm/yyyy",
     )
+    rma_final_rows: list[tuple[str, str, str]] = []
+    for order in ordenes:
+        key = _normalize_order_value(order)
+        finals = rma_final_map.get(key, [])
+        if not finals:
+            rma_final_rows.append((order, "", ""))
+            continue
+        for rma, rma_type in finals:
+            rma_final_rows.append((order, rma, rma_type))
     exportar_pestana_texto(
-        rows=rma_totales_rows,
-        cols=rma_totales_cols,
+        rows=rma_final_rows,
+        cols=["UID_ORDEN", "UID_RMAS_FINAL", "ID_RMAS_TYPES"],
         ruta=paths.salida_excel,
-        sheet_name=RMA_TOTALES_SHEET_NAME,
+        sheet_name=RMA_FINAL_SHEET_NAME,
     )
 
 
@@ -436,6 +447,7 @@ def _map_estado_final(
         "CUBIERTO": "NO PERDIDA",
         "PENDIENTE DE DOCUMENTACION": "PENDIENTE",
         "CERRADO EN CONTRA": "PERDIDA",
+        "EN DISPUTA":"PENDIENTE",
     }
     estado_final = base_mp.map(lambda v: mapping.get(v, ""))
     if order_col and order_col in df.columns:
