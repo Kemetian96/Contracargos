@@ -17,6 +17,7 @@ PG_RMA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "RmaxOrder.sql
 PG_TIPO_ENTREGA_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntrega.sql"
 PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "TipoEntregaFallback.sql"
 PG_DNI_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "DniPorOrden.sql"
+PG_EGIFT_STATUS_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "EgiftcardsStatusVale.sql"
 
 
 class PostgresRepository:
@@ -26,6 +27,7 @@ class PostgresRepository:
         self._query_tipo_entrega = PG_TIPO_ENTREGA_QUERY_PATH.read_text(encoding="utf-8")
         self._query_tipo_entrega_fallback = PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH.read_text(encoding="utf-8")
         self._query_dni = PG_DNI_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_egift_status = PG_EGIFT_STATUS_QUERY_PATH.read_text(encoding="utf-8")
 
     def obtener_rmas_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
         if not ordenes:
@@ -80,6 +82,22 @@ class PostgresRepository:
             if uid_order:
                 dni_map[uid_order] = document
         return dni_map
+
+    def obtener_egift_status_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
+        if not ordenes:
+            return {}
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_egift_status.replace("{{orders_in}}", orders_in)
+        rows, _cols = self._ejecutar_sql_raw(sql)
+        status_map: dict[str, str] = {}
+        for row in rows:
+            if not row:
+                continue
+            uid_order = str(row[0]).strip() if row[0] is not None else ""
+            status = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            if uid_order:
+                status_map[uid_order] = status
+        return status_map
 
     def obtener_tipo_entrega_por_ordenes(
         self,

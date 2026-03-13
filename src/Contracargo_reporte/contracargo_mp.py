@@ -138,6 +138,11 @@ def generar_reporte_mp(
             if not departamento_map.get(key):
                 departamento_map[key] = fb_departamento_map.get(key, "")
         tienda_map = _clear_tienda_for_vale(tienda_map, tipo_entrega_map)
+    # Estados finales para VALE segun egiftcards
+    vale_orders = [o for o in ordenes if tipo_entrega_map.get(_normalize_order_value(o)) == "VALE"]
+    egift_status_raw = repo.obtener_egift_status_por_ordenes(vale_orders)
+    vale_final_map = _build_vale_final_map(egift_status_raw)
+
     if ordenes:
         LOGGER.info("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
     facturada_map = _load_facturada_map(paths.salida_excel)
@@ -151,6 +156,7 @@ def generar_reporte_mp(
         rma_diff_map,
         dni_map,
         facturada_map,
+        vale_final_map,
         order_col,
     )
 
@@ -250,6 +256,7 @@ def _insertar_columnas_custom(
     rma_diff_map: dict[str, str],
     dni_map: dict[str, str],
     facturada_map: dict[str, str],
+    vale_final_map: dict[str, str],
     order_col: str | None,
 ) -> pd.DataFrame:
     # Inserta columnas nuevas despues de las columnas existentes + 3 columnas vacias.
@@ -293,7 +300,7 @@ def _insertar_columnas_custom(
             else:
                 values = base
         elif name == "ESTADO FINAL":
-            values = _map_estado_final(df, rma_diff_map, order_col)
+            values = _map_estado_final(df, rma_diff_map, vale_final_map, order_col)
         elif name == "DNI":
             values = orden_values.map(lambda v: dni_map.get(v, ""))
         else:
@@ -414,7 +421,12 @@ def _map_estado_mp(value: Any) -> str:
     return mapping.get(text, "")
 
 
-def _map_estado_final(df: pd.DataFrame, rma_diff_map: dict[str, str], order_col: str | None) -> pd.Series:
+def _map_estado_final(
+    df: pd.DataFrame,
+    rma_diff_map: dict[str, str],
+    vale_final_map: dict[str, str],
+    order_col: str | None,
+) -> pd.Series:
     if "Estado" in df.columns:
         base_mp = df["Estado"].map(_map_estado_mp).fillna("")
     else:
@@ -426,10 +438,16 @@ def _map_estado_final(df: pd.DataFrame, rma_diff_map: dict[str, str], order_col:
         "CERRADO EN CONTRA": "PERDIDA",
     }
     estado_final = base_mp.map(lambda v: mapping.get(v, ""))
-    if order_col and order_col in df.columns and rma_diff_map:
+    if order_col and order_col in df.columns:
         orden_values = df[order_col].apply(_normalize_order_value)
-        override = orden_values.map(lambda v: rma_diff_map.get(v, ""))
-        estado_final = override.where(override != "", estado_final)
+        if rma_diff_map:
+            # Override por totales antes del ajuste VALE.
+            override = orden_values.map(lambda v: rma_diff_map.get(v, ""))
+            estado_final = override.where(override != "", estado_final)
+        if vale_final_map:
+            # Override VALE al final de toda la logica.
+            override_vale = orden_values.map(lambda v: vale_final_map.get(v, ""))
+            estado_final = override_vale.where(override_vale != "", estado_final)
     return estado_final
 
 
@@ -448,6 +466,17 @@ def _build_rma_diff_map(rows: list[tuple[Any, ...]]) -> dict[str, str]:
             continue
         diff_map[uid_order] = "NO PERDIDA" if diff == 0 else "PERDIDA"
     return diff_map
+
+
+def _build_vale_final_map(status_map: dict[str, str]) -> dict[str, str]:
+    vale_map: dict[str, str] = {}
+    for order, status in status_map.items():
+        key = _normalize_order_value(order)
+        if status == "5":
+            vale_map[key] = "NO PERDIDA"
+        elif status in {"1", "2", "3"}:
+            vale_map[key] = "PENDIENTE"
+    return vale_map
 
 
 
