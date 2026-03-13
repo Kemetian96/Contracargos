@@ -97,21 +97,16 @@ def generar_reporte_mp(
     order_col = _resolve_order_column(df)
     ordenes = _extraer_ordenes(df, order_col)
     LOGGER.info("Columna ORDEN detectada: %s | Ordenes encontradas: %s", order_col, len(ordenes))
-    if ordenes:
-        LOGGER.info("Ejemplo ORDEN: %s", ordenes[:5])
     if not ordenes:
         LOGGER.warning("No se encontraron valores de ORDEN en la columna '%s'.", ORDEN_SOURCE_COLUMN)
-    rma_totales_rows, _rma_totales_cols = repo.obtener_rmas_totales_por_ordenes(ordenes)
-    rma_diff_map = _build_rma_diff_map(rma_totales_rows)
+    # rma_diff_map se calcula con la cadena (no usamos rma_totales_rows)
     rma_final_map_raw, rma_order_totals = repo.obtener_rmas_finales_por_ordenes(ordenes)
     dni_map_raw = repo.obtener_dni_por_ordenes(ordenes)
     dni_map = {_normalize_order_value(k): _normalize_order_value(v) for k, v in dni_map_raw.items()}
     rma_final_map = {_normalize_order_value(k): v for k, v in rma_final_map_raw.items()}
     rma_diff_map = _build_rma_diff_map_from_chain(rma_final_map, rma_order_totals)
     rma_map = _build_rma_concat_map(rma_final_map)
-    LOGGER.info("RMA finales encontrados: %s", len(rma_map))
-    if rma_map:
-        LOGGER.info("Ejemplo RMA finales: %s", list(rma_map.items())[:5])
+    LOGGER.debug("RMA finales encontrados: %s", len(rma_map))
     non_empty_rma = sum(1 for v in rma_map.values() if v)
     if non_empty_rma == 0 and rma_map:
         LOGGER.warning("Todos los RMA finales vienen vacios. Revisa la logica de cadena.")
@@ -147,7 +142,7 @@ def generar_reporte_mp(
     vale_status_map = _build_vale_status_map(orders_status_raw)
 
     if ordenes:
-        LOGGER.info("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
+        LOGGER.debug("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
     facturada_map = _load_facturada_map(paths.salida_excel)
     df = _insertar_columnas_custom(
         df,

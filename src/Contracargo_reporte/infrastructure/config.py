@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from typing import Optional
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -31,6 +32,13 @@ def _get_env_alias(primary: str, aliases: list[str], default: str | None = None)
     raise ValueError(f"Falta la variable de entorno obligatoria: {primary}")
 
 
+def _get_env_optional(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # PostgreSQL
@@ -51,6 +59,9 @@ class Settings:
     ui_height: int
     fecha_inicio_default: str
     fecha_fin_default: str
+    contracargo_origen_path: Optional[Path]
+    contracargo_salida_path: Optional[Path]
+    ventas_ruta_path: Optional[Path]
 
 
 def load_settings() -> Settings:
@@ -74,4 +85,13 @@ def load_settings() -> Settings:
         ui_height=int(_get_env("UI_HEIGHT", "260")),
         fecha_inicio_default=_get_env("FECHA_INICIO", "2026-01-01"),
         fecha_fin_default=_get_env("FECHA_FIN", "2026-01-01"),
+        contracargo_origen_path=(
+            Path(value) if (value := _get_env_optional("CONTRACARGO_ORIGEN_PATH")) else None
+        ),
+        contracargo_salida_path=(
+            Path(value) if (value := _get_env_optional("CONTRACARGO_SALIDA_PATH")) else None
+        ),
+        ventas_ruta_path=(
+            Path(value) if (value := _get_env_optional("VENTAS_RUTA_PATH")) else None
+        ),
     )

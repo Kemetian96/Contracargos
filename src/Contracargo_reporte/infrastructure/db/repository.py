@@ -41,9 +41,7 @@ class PostgresRepository:
         orders_in = _render_in_list(ordenes)
         sql = self._query_rma.replace("{{orders_in}}", orders_in)
         rows, _cols = self._ejecutar_sql_raw(sql)
-        LOGGER.info("RMA query rows: %s", len(rows))
-        if rows:
-            LOGGER.info("RMA sample rows: %s", rows[:5])
+        LOGGER.debug("RMA query rows: %s", len(rows))
         resultado: dict[str, str] = {}
         for row in rows:
             if not row:
@@ -380,68 +378,6 @@ def _parse_decimal(value: Any) -> Decimal:
     elif "," in text and "." not in text:
         text = text.replace(",", ".")
     return Decimal(text)
-
-    def _ejecutar_sql_raw(self, query: str) -> tuple[list[tuple[Any, ...]], list[str]]:
-        # Reintenta la conexion ante cortes.
-        for intento in range(1, self._settings.reintentos + 1):
-            conn = None
-            cur = None
-            try:
-                conn = psycopg2.connect(
-                    host=self._settings.pg_host,
-                    dbname=self._settings.pg_name,
-                    user=self._settings.pg_user,
-                    password=self._settings.pg_password,
-                    port=self._settings.pg_port,
-                    sslmode=self._settings.pg_sslmode,
-                    connect_timeout=self._settings.pg_connect_timeout,
-                    keepalives=1,
-                    keepalives_idle=30,
-                    keepalives_interval=10,
-                    keepalives_count=5,
-                )
-                conn.autocommit = True
-                cur = conn.cursor()
-                cur.execute(query)
-                rows = cur.fetchall()
-                cols = [c[0] for c in cur.description] if cur.description else []
-                return rows, cols
-            except psycopg2.OperationalError as exc:
-                LOGGER.warning(
-                    "Conexion PostgreSQL caida (intento %s/%s): %s",
-                    intento,
-                    self._settings.reintentos,
-                    exc,
-                )
-                if intento == self._settings.reintentos:
-                    raise
-                time.sleep(self._settings.espera_segundos)
-            finally:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
-
-        raise RuntimeError("No se pudo ejecutar la consulta PostgreSQL tras todos los reintentos.")
-
-    def probar_conexion(self) -> None:
-        # Conexion corta para validar acceso a PostgreSQL.
-        conn = psycopg2.connect(
-            host=self._settings.pg_host,
-            dbname=self._settings.pg_name,
-            user=self._settings.pg_user,
-            password=self._settings.pg_password,
-            port=self._settings.pg_port,
-            sslmode=self._settings.pg_sslmode,
-            connect_timeout=self._settings.pg_connect_timeout,
-        )
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT 1")
-            cur.fetchone()
-        finally:
-            cur.close()
-            conn.close()
 
 
 def _render_in_list(values: list[str]) -> str:

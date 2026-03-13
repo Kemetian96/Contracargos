@@ -9,21 +9,16 @@ from pathlib import Path
 # Permite ejecutar como script directo y como modulo.
 try:
     from .contracargo_mp import ReporteMPPaths, generar_reporte_mp
+    from .ventas_mp import generar_resumen_ventas_mp
     from .infrastructure.config import load_settings
 except ImportError:  # pragma: no cover - fallback para ejecucion directa
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from Contracargo_reporte.contracargo_mp import ReporteMPPaths, generar_reporte_mp
+    from Contracargo_reporte.ventas_mp import generar_resumen_ventas_mp
     from Contracargo_reporte.infrastructure.config import load_settings
 
-
-DEFAULT_ORIGEN = Path(
-    r"G:\Unidades compartidas\SAC - ADMIN\05.- Reportes\Contracargos_MP\2025\Reporte_Contracargos\Reporte_contracargo_MP_2025.xlsx"
-)
-DEFAULT_SALIDA = Path(
-    r"G:\Unidades compartidas\SAC - ADMIN\05.- Reportes\Contracargos_MP\2025\Reporte_Mp.xlsx"
-)
 
 
 def _parse_date(raw: str) -> date:
@@ -43,24 +38,40 @@ def main() -> None:
     settings = load_settings()
 
     parser = argparse.ArgumentParser(description="Genera Reporte MP (Data + Ejemplo).")
-    parser.add_argument("--origen", type=Path, default=DEFAULT_ORIGEN, help="Ruta del Excel fuente.")
-    parser.add_argument("--salida", type=Path, default=DEFAULT_SALIDA, help="Ruta del Excel destino.")
+    if not settings.contracargo_origen_path or not settings.contracargo_salida_path:
+        logging.warning(
+            "Rutas de contracargo no configuradas en .env (CONTRACARGO_ORIGEN_PATH / CONTRACARGO_SALIDA_PATH). No se ejecuta."
+        )
+        return
+
     parser.add_argument(
-        "--fecha-inicio",
-        type=_parse_date,
-        default=_parse_date(settings.fecha_inicio_default),
-        help="Fecha inicio (YYYY-MM-DD).",
+        "--origen",
+        type=Path,
+        default=settings.contracargo_origen_path,
+        help="Ruta del Excel fuente.",
     )
     parser.add_argument(
-        "--fecha-fin",
-        type=_parse_date,
-        default=_parse_date(settings.fecha_fin_default),
-        help="Fecha fin (YYYY-MM-DD).",
+        "--salida",
+        type=Path,
+        default=settings.contracargo_salida_path,
+        help="Ruta del Excel destino.",
     )
     args = parser.parse_args()
 
     paths = ReporteMPPaths(origen_excel=args.origen, salida_excel=args.salida)
-    generar_reporte_mp(paths=paths, fecha_inicio=args.fecha_inicio, fecha_fin=args.fecha_fin, settings=settings)
+    generar_reporte_mp(
+        paths=paths,
+        fecha_inicio=_parse_date(settings.fecha_inicio_default),
+        fecha_fin=_parse_date(settings.fecha_fin_default),
+        settings=settings,
+    )
+    if settings.ventas_ruta_path:
+        generar_resumen_ventas_mp(
+            settings.ventas_ruta_path,
+            paths.salida_excel,
+        )
+    else:
+        logging.info("VENTAS_RUTA_PATH no configurada, se omite resumen de ventas.")
 
 
 if __name__ == "__main__":
