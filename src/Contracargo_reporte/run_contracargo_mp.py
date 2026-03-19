@@ -59,6 +59,9 @@ def main() -> None:
     args = parser.parse_args()
 
     paths = ReporteMPPaths(origen_excel=args.origen, salida_excel=args.salida)
+    if not paths.origen_excel.exists():
+        logging.error("No existe el archivo de origen configurado: %s", paths.origen_excel)
+        return
     generar_reporte_mp(
         paths=paths,
         fecha_inicio=_parse_date(settings.fecha_inicio_default),
@@ -69,9 +72,16 @@ def main() -> None:
         generar_resumen_ventas_mp(
             settings.ventas_ruta_path,
             paths.salida_excel,
+            ruta_path2=settings.ventas_ruta_path2,
+        )
+    elif settings.ventas_ruta_path2:
+        generar_resumen_ventas_mp(
+            None,
+            paths.salida_excel,
+            ruta_path2=settings.ventas_ruta_path2,
         )
     else:
-        logging.info("VENTAS_RUTA_PATH no configurada, se omite resumen de ventas.")
+        logging.info("VENTAS_RUTA_PATH y VENTAS_RUTA_PATH2 no configuradas, se omite resumen de ventas.")
 
 
 if __name__ == "__main__":

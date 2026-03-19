@@ -24,9 +24,9 @@ def main() -> None:
 
     settings = load_settings()
 
-    if not settings.ventas_ruta_path:
+    if not settings.ventas_ruta_path and not settings.ventas_ruta_path2:
         logging.warning(
-            "VENTAS_RUTA_PATH no configurada en .env. No se ejecuta."
+            "VENTAS_RUTA_PATH y VENTAS_RUTA_PATH2 no configuradas en .env. No se ejecuta."
         )
         return
     if not settings.contracargo_salida_path:
@@ -43,6 +43,12 @@ def main() -> None:
         help="Carpeta con excels.",
     )
     parser.add_argument(
+        "--ruta2",
+        type=Path,
+        default=settings.ventas_ruta_path2,
+        help="Archivo o carpeta adicional para resumen por Fecha documentacion.",
+    )
+    parser.add_argument(
         "--salida",
         type=Path,
         default=settings.contracargo_salida_path,
@@ -51,7 +57,7 @@ def main() -> None:
     parser.add_argument("--sheet", default=DEFAULT_SHEET, help="Nombre de la pestaña resumen.")
     args = parser.parse_args()
 
-    generar_resumen_ventas_mp(args.ruta, args.salida, sheet_name=args.sheet)
+    generar_resumen_ventas_mp(args.ruta, args.salida, ruta_path2=args.ruta2, sheet_name=args.sheet)
 
 
 if __name__ == "__main__":

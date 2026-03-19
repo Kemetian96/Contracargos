@@ -12,6 +12,7 @@ Genera el reporte de contracargos en Excel a partir del archivo fuente y consult
    - `CONTRACARGO_ORIGEN_PATH`
    - `CONTRACARGO_SALIDA_PATH`
    - `VENTAS_RUTA_PATH`
+   - `VENTAS_RUTA_PATH2`
 
 ## Ejecución
 ```powershell

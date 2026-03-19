@@ -21,6 +21,7 @@ PG_TIPO_ENTREGA_FALLBACK_QUERY_PATH = Path(__file__).resolve().parent / "queries
 PG_DNI_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "DniPorOrden.sql"
 PG_EGIFT_STATUS_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "EgiftcardsStatusVale.sql"
 PG_ORDERS_STATUS_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "OrdersStatusVale.sql"
+PG_ORDERS_CHANGELOG_QUERY_PATH = Path(__file__).resolve().parent / "queries" / "OrdersChangelogStatus.sql"
 
 
 class PostgresRepository:
@@ -34,6 +35,7 @@ class PostgresRepository:
         self._query_dni = PG_DNI_QUERY_PATH.read_text(encoding="utf-8")
         self._query_egift_status = PG_EGIFT_STATUS_QUERY_PATH.read_text(encoding="utf-8")
         self._query_orders_status = PG_ORDERS_STATUS_QUERY_PATH.read_text(encoding="utf-8")
+        self._query_orders_changelog = PG_ORDERS_CHANGELOG_QUERY_PATH.read_text(encoding="utf-8")
 
     def obtener_rmas_por_ordenes(self, ordenes: list[str]) -> dict[str, str]:
         if not ordenes:
@@ -208,6 +210,61 @@ class PostgresRepository:
             if uid_order:
                 status_map[uid_order] = status
         return status_map
+
+    def obtener_historial_estados_por_ordenes(
+        self,
+        ordenes: list[str],
+    ) -> tuple[list[tuple[Any, ...]], list[str]]:
+        if not ordenes:
+            return [], []
+        orders_in = _render_in_list(ordenes)
+        sql = self._query_orders_changelog.replace("{{orders_in}}", orders_in)
+        statements = [stmt.strip() for stmt in sql.split(";") if stmt.strip()]
+        # Reintenta la conexion ante cortes.
+        for intento in range(1, self._settings.reintentos + 1):
+            conn = None
+            cur = None
+            try:
+                conn = psycopg2.connect(
+                    host=self._settings.pg_host,
+                    dbname=self._settings.pg_name,
+                    user=self._settings.pg_user,
+                    password=self._settings.pg_password,
+                    port=self._settings.pg_port,
+                    sslmode=self._settings.pg_sslmode,
+                    connect_timeout=self._settings.pg_connect_timeout,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+                conn.autocommit = True
+                cur = conn.cursor()
+                rows: list[tuple[Any, ...]] = []
+                cols: list[str] = []
+                for idx, stmt in enumerate(statements):
+                    cur.execute(stmt)
+                    if idx == len(statements) - 1:
+                        rows = cur.fetchall()
+                        cols = [c[0] for c in cur.description] if cur.description else []
+                return rows, cols
+            except psycopg2.OperationalError as exc:
+                LOGGER.warning(
+                    "Conexion PostgreSQL caida (intento %s/%s): %s",
+                    intento,
+                    self._settings.reintentos,
+                    exc,
+                )
+                if intento == self._settings.reintentos:
+                    raise
+                time.sleep(self._settings.espera_segundos)
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+        raise RuntimeError("No se pudo ejecutar la consulta PostgreSQL tras todos los reintentos.")
 
     def obtener_tipo_entrega_por_ordenes(
         self,

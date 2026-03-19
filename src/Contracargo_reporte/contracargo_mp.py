@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 import re
 import pandas as pd
@@ -118,6 +119,7 @@ def generar_reporte_mp(
     ubigeo_map = {_normalize_order_value(k): _normalize_order_value(v) for k, v in ubigeo_raw.items()}
     departamento_map = {_normalize_order_value(k): _map_departamento(v) for k, v in ubigeo_raw.items()}
     tienda_map = _clear_tienda_for_vale(tienda_map, tipo_entrega_map)
+    tipo_entrega_map = _override_tipo_entrega_por_tienda(tienda_map, tipo_entrega_map)
 
     missing_for_fallback = _ordenes_con_campos_vacios(ordenes, tienda_map, ubigeo_map, departamento_map)
     if missing_for_fallback:
@@ -134,6 +136,7 @@ def generar_reporte_mp(
             if not departamento_map.get(key):
                 departamento_map[key] = fb_departamento_map.get(key, "")
         tienda_map = _clear_tienda_for_vale(tienda_map, tipo_entrega_map)
+        tipo_entrega_map = _override_tipo_entrega_por_tienda(tienda_map, tipo_entrega_map)
     # Estados finales para VALE segun egiftcards
     vale_orders = [o for o in ordenes if tipo_entrega_map.get(_normalize_order_value(o)) == "VALE"]
     egift_status_raw = repo.obtener_egift_status_por_ordenes(vale_orders)
@@ -144,6 +147,12 @@ def generar_reporte_mp(
     if ordenes:
         LOGGER.debug("ORDENES enviadas: %s | RMAs encontrados: %s", len(ordenes), len(rma_map))
     facturada_map = _load_facturada_map(paths.salida_excel)
+    if ordenes:
+        changelog_rows, _changelog_cols = repo.obtener_historial_estados_por_ordenes(ordenes)
+        if changelog_rows:
+            facturada_map.update(
+                _build_facturada_map_from_changelog(changelog_rows, tipo_entrega_map)
+            )
     df = _insertar_columnas_custom(
         df,
         rma_map,
@@ -160,7 +169,11 @@ def generar_reporte_mp(
     )
 
     data_cols = _render_headers(list(df.columns))
-    data_rows = _df_to_rows(df, date_columns=DATE_COLUMNS)
+    data_rows = _df_to_rows(
+        df,
+        date_columns=DATE_COLUMNS,
+        numeric_columns={"Monto", "Monto de la transacción", "Monto de la transaccion"},
+    )
 
     exportar_pestana_texto(
         rows=data_rows,
@@ -169,6 +182,7 @@ def generar_reporte_mp(
         sheet_name=DATA_SHEET_NAME,
         date_columns=DATE_COLUMNS,
         date_format="dd/mm/yyyy",
+        numeric_columns={"Monto", "Monto de la transacción", "Monto de la transaccion"},
     )
     eliminar_pestanas(paths.salida_excel, ["RMA_Totales_TMP", "RMA_Final_TMP"])
 
@@ -188,10 +202,7 @@ def _cargar_y_transformar(origen_excel: Path) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
 
-    if "Monto" in df.columns:
-        df["Monto"] = pd.to_numeric(df["Monto"], errors="coerce")
-        df = df[df["Monto"].fillna(0) != 0]
-        df = df.sort_values(by="Monto", ascending=True)
+    df = _normalizar_montos(df)
 
     # Elimina columnas no requeridas.
     df = df.drop(columns=[c for c in DROP_COLUMNS if c in df.columns], errors="ignore")
@@ -203,6 +214,9 @@ def _cargar_y_transformar(origen_excel: Path) -> pd.DataFrame:
 
 
 def _leer_excel(origen_excel: Path, sheet_name: str) -> pd.DataFrame:
+    origen_excel = Path(origen_excel)
+    if not origen_excel.exists():
+        raise FileNotFoundError(f"No existe el archivo origen: {origen_excel}")
     try:
         return pd.read_excel(origen_excel, sheet_name=sheet_name, header=None)
     except Exception as exc:
@@ -227,13 +241,52 @@ def _normalize_header(value: Any, idx: int) -> str:
     return text if text else f"col_{idx + 1}"
 
 
-def _df_to_rows(df: pd.DataFrame, date_columns: set[str]) -> list[tuple[Any, ...]]:
+def _normalize_key(text: str) -> str:
+    value = unicodedata.normalize("NFKD", text)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value.strip().lower()
+
+
+def _normalizar_montos(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    norm_cols = {_normalize_key(col): col for col in df.columns}
+
+    monto_col = norm_cols.get("monto")
+    if monto_col:
+        df[monto_col] = df[monto_col].apply(_safe_parse_decimal)
+        df = df[df[monto_col].fillna(0) != 0]
+        df = df.sort_values(by=monto_col, ascending=True)
+
+    trans_col = norm_cols.get("monto de la transaccion")
+    if trans_col:
+        df[trans_col] = df[trans_col].apply(_safe_parse_decimal)
+
+    return df
+
+
+def _safe_parse_decimal(value: Any) -> Decimal | None:
+    try:
+        return _parse_decimal_local(value)
+    except InvalidOperation:
+        return None
+
+
+def _df_to_rows(
+    df: pd.DataFrame,
+    date_columns: set[str],
+    numeric_columns: set[str] | None = None,
+) -> list[tuple[Any, ...]]:
     rows: list[tuple[Any, ...]] = []
+    numeric_columns = numeric_columns or set()
+    numeric_norm = {_normalize_key(name) for name in numeric_columns}
     for _, row in df.iterrows():
         cells = []
         for col, value in row.items():
             if col in date_columns:
                 cells.append(_to_date(value))
+            elif _normalize_key(col) in numeric_norm:
+                cells.append(_to_number(value))
             else:
                 cells.append(_to_text(value))
         rows.append(tuple(cells))
@@ -349,6 +402,19 @@ def _to_text(value: Any) -> str:
         return value.isoformat()
     text = str(value)
     return "" if text.strip().lower() == "nan" else text
+
+
+def _to_number(value: Any) -> float | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        return float(_parse_decimal_local(value))
+    except Exception:
+        return None
 
 
 def _extraer_ordenes(df: pd.DataFrame, order_col: str | None) -> list[str]:
@@ -601,6 +667,56 @@ def _normalize_text(value: Any) -> str:
     return text
 
 
+def _extract_estado(comment: Any) -> str:
+    if comment is None:
+        return ""
+    text = str(comment).strip().lower()
+    if "estado orden" in text and ":" in text:
+        text = text.split(":", 1)[1].strip()
+    return text
+
+
+def _build_facturada_map_from_changelog(
+    rows: list[tuple[Any, ...]],
+    tipo_entrega_map: dict[str, str],
+) -> dict[str, str]:
+    # Construye mapa de TIPO DE FACTURADA segun historial de estados.
+    grouped: dict[str, list[tuple[int, str, Any]]] = {}
+    for row in rows:
+        if not row or len(row) < 6:
+            continue
+        uid_order = _normalize_order_value(row[1])
+        comment = row[2]
+        id_user = row[4]
+        cuid_updated = row[5] if row[5] is not None else 0
+        if uid_order:
+            grouped.setdefault(uid_order, []).append((int(cuid_updated), str(comment), id_user))
+
+    result: dict[str, str] = {}
+    for uid, entries in grouped.items():
+        entries.sort(key=lambda x: x[0])
+        is_vale = tipo_entrega_map.get(uid) == "VALE"
+        target = "finalizada" if is_vale else "confirmada"
+        created_user = None
+        decided = False
+        for _, comment, id_user in entries:
+            estado = _extract_estado(comment)
+            if "creada" in estado and created_user is None:
+                created_user = id_user
+                continue
+            if created_user is not None and target in estado:
+                if id_user == created_user:
+                    result[uid] = "AUTOMATICA"
+                else:
+                    result[uid] = "MANUAL"
+                decided = True
+                break
+        if not decided:
+            # Si no hay historial suficiente, no sobreescribe.
+            continue
+    return result
+
+
 def _load_facturada_map(path: Path) -> dict[str, str]:
     ruta = Path(path)
     if not ruta.exists():
@@ -685,4 +801,17 @@ def _clear_tienda_for_vale(
     for order, tipo in tipo_entrega_map.items():
         if tipo == "VALE":
             resultado[order] = ""
+    return resultado
+
+
+def _override_tipo_entrega_por_tienda(
+    tienda_map: dict[str, str],
+    tipo_entrega_map: dict[str, str],
+) -> dict[str, str]:
+    resultado = dict(tipo_entrega_map)
+    for order, tienda in tienda_map.items():
+        if not tienda:
+            continue
+        if str(tienda).strip().lower().startswith("lock"):
+            resultado[order] = "LOCKER"
     return resultado

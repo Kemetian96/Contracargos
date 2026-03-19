@@ -62,6 +62,7 @@ class Settings:
     contracargo_origen_path: Optional[Path]
     contracargo_salida_path: Optional[Path]
     ventas_ruta_path: Optional[Path]
+    ventas_ruta_path2: Optional[Path]
 
 
 def load_settings() -> Settings:
@@ -93,5 +94,8 @@ def load_settings() -> Settings:
         ),
         ventas_ruta_path=(
             Path(value) if (value := _get_env_optional("VENTAS_RUTA_PATH")) else None
+        ),
+        ventas_ruta_path2=(
+            Path(value) if (value := _get_env_optional("VENTAS_RUTA_PATH2")) else None
         ),
     )

@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any
+import unicodedata
 import logging
 
 import pandas as pd
@@ -18,6 +19,7 @@ def exportar_pestana_texto(
     freeze_panes: str | None = "A2",
     date_columns: set[str] | None = None,
     date_format: str = "dd/mm/yyyy",
+    numeric_columns: set[str] | None = None,
 ) -> None:
     """
     Escribe una hoja en un Excel existente sin eliminar la pestaña:
@@ -48,7 +50,12 @@ def exportar_pestana_texto(
         wb.remove(wb["Sheet"])
 
     date_columns = date_columns or set()
+    numeric_columns = numeric_columns or set()
     date_col_indices = {idx + 1 for idx, name in enumerate(cols) if name in date_columns}
+    numeric_norm = {_normalize_key(name) for name in numeric_columns}
+    numeric_col_indices = {
+        idx + 1 for idx, name in enumerate(cols) if _normalize_key(name) in numeric_norm
+    }
 
     for col_idx, header in enumerate(cols, start=1):
         ws.cell(row=1, column=col_idx, value=header)
@@ -57,6 +64,10 @@ def exportar_pestana_texto(
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             if col_idx in date_col_indices and isinstance(value, (date, datetime)):
                 cell.number_format = date_format
+            if col_idx in numeric_col_indices and isinstance(value, (int, float)):
+                cell.number_format = "#,##0.00"
+            if col_idx in numeric_col_indices and hasattr(value, "quantize"):
+                cell.number_format = "#,##0.00"
 
     if freeze_panes:
         ws.freeze_panes = freeze_panes
@@ -69,6 +80,12 @@ def _clear_sheet(ws) -> None:
     for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
         for cell in row:
             cell.value = None
+
+
+def _normalize_key(text: str) -> str:
+    value = unicodedata.normalize("NFKD", text)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value.strip().lower()
 
 
 def eliminar_pestanas(ruta: Path, sheet_names: list[str]) -> None:
